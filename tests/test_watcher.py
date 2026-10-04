@@ -90,3 +90,33 @@ def test_csv_export_has_a_header_and_every_row(tmp_path: Path):
     lines = path.read_text(encoding="utf-8").strip().splitlines()
     assert lines[0].startswith("sku,title,price")
     assert len(lines) == 3
+
+
+def _rows(prices):
+    return [{"sku": f"b{i}", "title": f"Book {i}", "price": p, "currency": "£", "rating": 3 + i % 2,
+             "in_stock": i != 2, "category": "Mystery", "url": f"https://example.test/b{i}"}
+            for i, p in enumerate(prices)]
+
+
+def test_report_shows_deltas_against_previous_run(tmp_path):
+    from watcher.cli import write_report
+    store = Store(tmp_path / "w.db")
+    store.save_run(_rows([10.00, 20.00, 30.00]), "https://example.test", "http", pages=1, seconds=0.4)
+    run2 = store.save_run(_rows([8.50, 20.00, 30.00]), "https://example.test", "http", pages=1, seconds=0.3,
+                          source_label="Example store")
+    html = write_report(store, run2, tmp_path, theme="light").read_text()
+    assert 'data-theme="light"' in html
+    assert "Price drop" in html and "-1.50" in html
+    assert "-£0.50" in html            # average price fell from 20.00 to 19.50
+    assert "Example store" in html
+    assert "https://fonts.googleapis.com" not in html   # no external requests
+
+
+def test_report_empty_state_when_nothing_changed(tmp_path):
+    from watcher.cli import write_report
+    store = Store(tmp_path / "w.db")
+    store.save_run(_rows([10.00, 20.00]), "https://example.test", "http", pages=1, seconds=0.2)
+    run2 = store.save_run(_rows([10.00, 20.00]), "https://example.test", "http", pages=1, seconds=0.2)
+    html = write_report(store, run2, tmp_path).read_text()
+    assert "No changes since the last run" in html
+    assert 'data-theme="dark"' in html

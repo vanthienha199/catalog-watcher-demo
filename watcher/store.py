@@ -49,12 +49,19 @@ class Store:
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(runs)")}
+        for name, kind in (("pages", "INTEGER"), ("seconds", "REAL"), ("source_label", "TEXT")):
+            if name not in cols:
+                self.conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {kind}")
+        self.conn.commit()
 
-    def save_run(self, products: list[dict], source: str, engine: str) -> int:
+    def save_run(self, products: list[dict], source: str, engine: str,
+                 pages: int | None = None, seconds: float | None = None, source_label: str | None = None) -> int:
         cur = self.conn.cursor()
         cur.execute(
-            "INSERT INTO runs (started_at, source, engine, products) VALUES (?,?,?,?)",
-            (datetime.now(timezone.utc).isoformat(timespec="seconds"), source, engine, len(products)),
+            "INSERT INTO runs (started_at, source, engine, products, pages, seconds, source_label) VALUES (?,?,?,?,?,?,?)",
+            (datetime.now(timezone.utc).isoformat(timespec="seconds"), source, engine, len(products),
+             pages, seconds, source_label),
         )
         run_id = cur.lastrowid
         cur.executemany(
@@ -74,6 +81,13 @@ class Store:
         return self.conn.execute(
             "SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
+
+    def run(self, run_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+
+    def previous_run_id(self, run_id: int) -> int | None:
+        row = self.conn.execute("SELECT MAX(id) AS id FROM runs WHERE id < ?", (run_id,)).fetchone()
+        return row["id"] if row and row["id"] is not None else None
 
     def observations(self, run_id: int) -> list[sqlite3.Row]:
         return self.conn.execute(

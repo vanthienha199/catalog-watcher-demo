@@ -10,11 +10,18 @@ It ships with two engines. The `http` engine is fast and suits server rendered p
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python3 -m watcher.cli run                 # crawl, store, export CSV, build the HTML report
+python3 -m watcher.cli report --run 2      # rebuild the report for any stored run (--theme light)
 python3 -m watcher.cli history             # list previous runs
-python3 -m pytest tests -q                 # 7 tests
+python3 -m pytest tests -q                 # 9 tests
 ```
 
-Each run writes `data/run-N.csv` and `data/report-N.html`, and compares itself against the run before it. Point it anywhere with `--source`, and use `--engine browser` for a JavaScript rendered site.
+Each run writes `data/run-N.csv` and `data/report-N.html` and compares itself against the run before it. The report is a single HTML file with fonts embedded and no outside requests: four KPI cards with the change since the last run, the table of what changed, average price by rating, and the cheapest items, in a dark and a light theme. A sample is in `docs/sample-report.html`.
+
+To run it every morning at 7, add one line with `crontab -e`:
+
+```
+0 7 * * * cd /path/to/catalog-watcher && .venv/bin/python -m watcher.cli run --max-pages 3
+```
 
 ## Seeing the change report with real differences
 
@@ -27,5 +34,13 @@ The practice store never changes its prices, so a second run finds nothing. `fix
 | `--max-pages` | How far to follow the next page link |
 | `--delay` | Seconds between page requests, keep it polite |
 | `--db`, `--out-dir` | Where the database, CSV and report go |
+| `--source-label` | Friendly source name shown in the log and report |
+| `--theme` | `dark` (default) or `light` report |
+
+`npm install && npm run gallery` regenerates the screenshots in `docs/` from real runs with Playwright.
+
+![Hero](docs/hero.png)
+![Report, dark](docs/report-dark.png)
+![Run output and CSV](docs/run-and-csv.png)
 
 Built by Ha Le as a portfolio sample. No client data is used anywhere in this repository.

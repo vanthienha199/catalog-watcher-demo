@@ -1,0 +1,1 @@
+{ "name": "catalog-watcher-gallery", "private": true, "scripts": { "gallery": "node scripts/gallery.js docs/raw docs/raw" }, "devDependencies": { "playwright": "1.58.2" } }

@@ -92,31 +92,79 @@ def test_csv_export_has_a_header_and_every_row(tmp_path: Path):
     assert len(lines) == 3
 
 
-def _rows(prices):
-    return [{"sku": f"b{i}", "title": f"Book {i}", "price": p, "currency": "£", "rating": 3 + i % 2,
-             "in_stock": i != 2, "category": "Mystery", "url": f"https://example.test/b{i}"}
+
+def _rows(prices, stock=None):
+    stock = stock or [True] * len(prices)
+    return [{"sku": f"book_{i}", "title": f"Book {i}", "price": p, "currency": "£", "rating": 3,
+             "in_stock": stock[i], "category": "Mystery", "url": f"https://example.test/b{i}"}
             for i, p in enumerate(prices)]
 
 
-def test_report_shows_deltas_against_previous_run(tmp_path):
-    from watcher.cli import write_report
-    store = Store(tmp_path / "w.db")
-    store.save_run(_rows([10.00, 20.00, 30.00]), "https://example.test", "http", pages=1, seconds=0.4)
-    run2 = store.save_run(_rows([8.50, 20.00, 30.00]), "https://example.test", "http", pages=1, seconds=0.3,
-                          source_label="Example store")
-    html = write_report(store, run2, tmp_path, theme="light").read_text()
-    assert 'data-theme="light"' in html
-    assert "Price drop" in html and "-1.50" in html
-    assert "-£0.50" in html            # average price fell from 20.00 to 19.50
-    assert "Example store" in html
-    assert "https://fonts.googleapis.com" not in html   # no external requests
+def _report(store, run_id, tmp_path):
+    from watcher.report import build
+    return build(store, run_id, tmp_path / f"report-{run_id}.html").read_text()
 
 
-def test_report_empty_state_when_nothing_changed(tmp_path):
-    from watcher.cli import write_report
+def test_report_leads_with_the_biggest_drop_in_red_and_rises_in_ink(tmp_path):
     store = Store(tmp_path / "w.db")
-    store.save_run(_rows([10.00, 20.00]), "https://example.test", "http", pages=1, seconds=0.2)
-    run2 = store.save_run(_rows([10.00, 20.00]), "https://example.test", "http", pages=1, seconds=0.2)
-    html = write_report(store, run2, tmp_path).read_text()
-    assert "No changes since the last run" in html
-    assert 'data-theme="dark"' in html
+    store.save_run(_rows([10.00, 20.00, 30.00, 40.00]), "https://example.test", "http", started_at="2026-09-01T07:00:00")
+    run2 = store.save_run(_rows([9.50, 15.00, 33.00, 40.00]), "https://example.test", "http", started_at="2026-09-02T07:00:00")
+    html = _report(store, run2, tmp_path)
+    assert "Two prices fell and one rose since yesterday." in html
+    lead = html.index('class="tile drop lead"')
+    assert html.index("Book 1", lead) < html.index("Book 0", lead)   # -25% leads, -5% follows
+    assert '<article class="tile rise">' in html
+    assert "#C8102E" in html and html.count("var(--red)") >= 3
+    assert "https://fonts" not in html   # no outside requests
+    assert "uppercase" not in html
+
+
+def test_report_quiet_day_is_an_empty_state(tmp_path):
+    store = Store(tmp_path / "w.db")
+    store.save_run(_rows([10.00, 20.00]), "https://example.test", "http", started_at="2026-09-01T07:00:00")
+    run2 = store.save_run(_rows([10.00, 20.00]), "https://example.test", "http", started_at="2026-09-02T07:00:00")
+    html = _report(store, run2, tmp_path)
+    assert "Nothing moved since yesterday." in html
+    assert 'class="grid"' not in html
+
+
+def test_failed_run_is_recorded_skipped_for_compare_and_reported(tmp_path):
+    store = Store(tmp_path / "w.db")
+    good = store.save_run(_rows([10.00, 20.00]), "https://example.test", "http", started_at="2026-09-01T07:00:00")
+    bad = store.save_failed_run("https://example.test", "http", "The site timed out after 3 tries.",
+                                started_at="2026-09-02T07:00:00")
+    after = store.save_run(_rows([8.00, 20.00]), "https://example.test", "http", started_at="2026-09-03T07:00:00")
+    assert store.previous_run_id(after) == good
+    assert [c.kind for c in store.compare(store.previous_run_id(after), after)] == ["price_drop"]
+    html = _report(store, bad, tmp_path)
+    assert "This morning&#39;s check failed." in html or "This morning's check failed." in html
+    assert "timed out after 3 tries" in html and "Tue 1 Sep 2026" in html
+
+
+def test_cli_records_a_failed_run_when_the_site_is_down(tmp_path):
+    from watcher.cli import main
+    code = main(["run", "--source", "http://127.0.0.1:9/nothing.html", "--db", str(tmp_path / "w.db"),
+                 "--out-dir", str(tmp_path), "--retries", "1", "--retry-wait", "0", "--quiet"])
+    assert code == 1
+    row = Store(tmp_path / "w.db").runs()[0]
+    assert row["status"] == "failed" and "2 tries" in row["error"]
+
+
+def test_price_history_feeds_the_sparkline(tmp_path):
+    store = Store(tmp_path / "w.db")
+    for d, p in enumerate([10.00, 11.00, 10.50, 8.00], start=1):
+        last = store.save_run(_rows([p]), "https://example.test", "http", started_at=f"2026-09-0{d}T07:00:00")
+    assert [p for _, p in store.price_history(last)["book_0"]] == [10.00, 11.00, 10.50, 8.00]
+    html = _report(store, last, tmp_path)
+    assert '<svg class="spark"' in html and "Lowest price in 30 days." in html
+
+
+def test_alert_is_written_only_when_something_changed(tmp_path):
+    from watcher.alert import write_and_send
+    store = Store(tmp_path / "w.db")
+    a = store.save_run(_rows([10.00, 20.00]), "https://example.test", "http", started_at="2026-09-01T07:00:00")
+    b = store.save_run(_rows([10.00, 20.00], [True, False]), "https://example.test", "http", started_at="2026-09-02T07:00:00")
+    assert write_and_send(store, a, [], tmp_path, tmp_path / "r.html") is None
+    path = write_and_send(store, b, store.compare(a, b), tmp_path, tmp_path / "r.html")
+    text = (tmp_path / "alerts" / f"run-{b}.txt").read_text()
+    assert path.exists() and "One book sold out since yesterday" in text and "Book 1: sold out" in text

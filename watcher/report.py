@@ -1,13 +1,14 @@
-"""Render a standalone HTML report from a run and its comparison.
+"""Render the morning report as one standalone HTML page, laid out like a
+mail-order catalog: what changed is the hero, the biggest markdown gets the
+biggest tile, and the rest of the shelf follows as a price list.
 
-The report is a single file with no external requests: fonts are embedded,
-and it ships a dark and a light theme with a toggle.
+The page has no outside requests: fonts are embedded and the sparklines are
+inline SVG. Red is used for price drops and nothing else.
 """
 
 from __future__ import annotations
 
 import base64
-import statistics
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -19,240 +20,261 @@ FONTS = Path(__file__).parent / "assets" / "fonts"
 
 @lru_cache(maxsize=1)
 def font_css() -> str:
-    faces = [("Bricolage", "bricolage-700", 700), ("Plex", "plex-400", 400), ("Plex", "plex-500", 500),
-             ("Plex", "plex-600", 600), ("Mono", "mono-500", 500)]
+    faces = [("Bodoni", "bodoni-600", 600), ("Karla", "karla-400", 400), ("Karla", "karla-500", 500), ("Karla", "karla-700", 700)]
     out = []
     for family, name, weight in faces:
         path = FONTS / f"{name}.woff2"
         if path.exists():
             data = base64.b64encode(path.read_bytes()).decode()
-            out.append(f'@font-face{{font-family:"{family}";font-weight:{weight};'
+            out.append(f'@font-face{{font-family:"{family}";font-weight:{weight};font-display:block;'
                        f'src:url(data:font/woff2;base64,{data}) format("woff2")}}')
     return "\n".join(out)
 
 
+def when(iso: str, fmt: str = "%a %-d %b %Y") -> str:
+    return datetime.fromisoformat(iso).strftime(fmt)
+
+
+def sparkline(points: list[float], width: int = 132, height: int = 34, drop: bool = False) -> str:
+    """30-day price line as inline SVG. The last point is marked."""
+    if len(points) < 2:
+        return ""
+    lo, hi = min(points), max(points)
+    span = (hi - lo) or 1.0
+    step = width / (len(points) - 1)
+    xy = [(i * step, height - 4 - (p - lo) / span * (height - 8)) for i, p in enumerate(points)]
+    path = " ".join(f"{'M' if i == 0 else 'L'}{x:.1f} {y:.1f}" for i, (x, y) in enumerate(xy))
+    lx, ly = xy[-1]
+    dot = "var(--red)" if drop else "var(--ink)"
+    return (f'<svg class="spark" viewBox="0 0 {width} {height}" width="{width}" height="{height}" aria-hidden="true">'
+            f'<path d="{path}" fill="none" stroke="var(--rule)" stroke-width="1.4" stroke-linejoin="round"/>'
+            f'<circle cx="{lx:.1f}" cy="{ly:.1f}" r="2.6" fill="{dot}"/></svg>')
+
+
 TEMPLATE = Template(
     """<!doctype html>
-<html lang="en" data-theme="{{ theme }}"><head><meta charset="utf-8">
+<html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ title }}, run {{ run_id }}</title>
+<title>Catalogue Watch, {{ issue_date }}</title>
 <style>
 {{ fonts }}
-:root{--canvas:#15171B;--surface:#1E2126;--raised:#262A30;--line:#2F333A;--ink:#F3EFE7;--muted:#A7A39B;--faint:#77736C;
---accent:#F2994A;--good:#7CBA8C;--bad:#E8806E;--good-bg:rgba(124,186,140,.14);--bad-bg:rgba(232,128,110,.14);--bar:#3A3F47;--r:10px}
-[data-theme="light"]{--canvas:#F6F3EE;--surface:#FFFFFF;--raised:#F1EDE6;--line:#E4DED4;--ink:#1B1A17;--muted:#6E6A62;--faint:#9A958C;
---accent:#D9782A;--good:#3F8A55;--bad:#C2543F;--good-bg:#E6F1E8;--bad-bg:#F7E4DE;--bar:#D9D3C8}
+:root{--paper:#F3EFE6;--sheet:#FBF9F4;--ink:#1A1A1A;--soft:#5B574F;--faint:#8A857B;--rule:#9C978D;--hair:#DCD5C8;--red:#C8102E}
 *{box-sizing:border-box}
-html,body{background:var(--canvas)}
-body{margin:0;color:var(--ink);font-family:"Plex",system-ui,sans-serif;font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
-.wrap{max-width:1180px;margin:0 auto;padding:40px 48px 56px}
-.mono,.num,td.r,th.r{font-family:"Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}
-header{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;margin-bottom:32px}
-.brand{display:flex;gap:16px;align-items:center}
-.logo{width:44px;height:44px;border-radius:var(--r);background:var(--surface);border:1px solid var(--line);display:grid;place-items:center}
-h1{font-family:"Bricolage","Plex",sans-serif;font-weight:700;font-size:34px;line-height:1.05;letter-spacing:-.02em;margin:0}
-.run{font-family:"Mono",monospace;font-size:12px;color:var(--muted);margin-top:8px}
-.run b{color:var(--accent);font-weight:500}
-.right{display:flex;gap:8px;align-items:center}
-.badge{font-family:"Mono",monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 45%,transparent);border-radius:999px;padding:4px 12px;white-space:nowrap}
-.toggle{all:unset;cursor:pointer;font-size:12px;color:var(--muted);border:1px solid var(--line);border-radius:var(--r);padding:6px 12px;background:var(--surface)}
-.toggle:hover{color:var(--ink)}
-.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:32px}
-.kpi{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:20px 24px}
-.kpi .label{font-family:"Mono",monospace;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint)}
-.kpi .value{font-family:"Mono",monospace;font-size:30px;font-weight:500;line-height:1.2;margin-top:8px;letter-spacing:-.01em}
-.kpi .delta{font-family:"Mono",monospace;font-size:12px;margin-top:6px;color:var(--muted)}
-.kpi .delta .up{color:var(--bad)} .kpi .delta .down{color:var(--good)} .kpi .delta .flat{color:var(--faint)}
-.kpi.hot{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}
-.kpi.hot .value{color:var(--accent)}
-h2{font-family:"Bricolage","Plex",sans-serif;font-weight:700;letter-spacing:-.01em;font-size:21px;margin:0}
-.sec-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px}
-.sec-head span{font-family:"Mono",monospace;font-size:12px;color:var(--faint)}
-section{margin-bottom:32px}
-.grid2{display:grid;grid-template-columns:1fr 1.25fr;gap:24px}
-table{width:100%;border-collapse:separate;border-spacing:0;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
-th,td{text-align:left;padding:12px 16px;border-bottom:1px solid var(--line);font-size:14px}
-th{font-family:"Mono",monospace;font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);background:var(--raised)}
-tbody tr:last-child td{border-bottom:0}
-td.r,th.r{text-align:right;font-size:13.5px}
-td.title{max-width:340px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.chip{display:inline-block;border-radius:6px;padding:2px 9px;font-size:12px;font-weight:600;white-space:nowrap}
-.chip.drop{background:var(--good-bg);color:var(--good)}
-.chip.rise{background:var(--bad-bg);color:var(--bad)}
-.chip.stock{background:var(--raised);color:var(--muted)}
-.d-down{color:var(--good);font-weight:500} .d-up{color:var(--bad);font-weight:500}
-.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:24px}
-.bars{display:flex;flex-direction:column;gap:12px}
-.bar{display:grid;grid-template-columns:96px 1fr 72px;align-items:center;gap:12px;font-size:13px;color:var(--muted)}
-.bar .track{height:18px;border-radius:6px;overflow:hidden;background:var(--raised)}
-.bar .fill{height:100%;background:var(--bar);border-radius:6px}
-.bar.top .fill{background:var(--accent)} .bar.top{color:var(--ink)}
-.bar .v{text-align:right;font-family:"Mono",monospace;font-variant-numeric:tabular-nums;color:var(--ink)}
-.legend{font-family:"Mono",monospace;font-size:11px;color:var(--faint);margin-top:16px}
-.stock-no{color:var(--bad)}
-.empty{text-align:center;color:var(--muted);background:var(--surface);border:1px dashed var(--line);border-radius:var(--r);padding:32px 24px}
-.empty b{display:block;color:var(--ink);font-size:16px;margin-bottom:4px}
-footer{font-family:"Mono",monospace;color:var(--faint);font-size:12px;border-top:1px solid var(--line);padding-top:16px;display:flex;justify-content:space-between;gap:16px}
-</style></head><body><div class="wrap">
-<header>
-  <div class="brand">
-    <div class="logo"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M3 17l5-6 4 3 7-9" stroke="#F2994A" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="19" cy="5" r="2" fill="#F2994A"/></svg></div>
-    <div>
-      <h1>{{ title }}</h1>
-      <div class="run">Run <b>{{ run_id }}</b> · {{ when }} · {{ engine }} engine · {{ pages }} pages in {{ '%.1f'|format(seconds) }}s</div>
-    </div>
-  </div>
-  <div class="right"><button class="toggle" id="toggle">Light / dark</button><span class="badge">Sample project</span></div>
+html,body{background:var(--paper)}
+body{margin:0;color:var(--ink);font-family:"Karla",system-ui,sans-serif;font-size:16px;line-height:1.5;font-variant-numeric:tabular-nums lining-nums;-webkit-font-smoothing:antialiased}
+.sheet{max-width:1160px;margin:0 auto;padding:44px 56px 40px}
+.mast{display:grid;grid-template-columns:1fr auto;align-items:end;gap:24px;border-bottom:3px double var(--ink);padding-bottom:16px}
+h1{font-family:"Bodoni",Didot,serif;font-weight:600;font-size:64px;line-height:.95;letter-spacing:-.01em;margin:0}
+.shelf{color:var(--soft);margin-top:10px;font-size:16px}
+.issue{text-align:right;font-size:15px;color:var(--soft)}
+.issue b{display:block;color:var(--ink);font-weight:700;font-size:17px}
+.lede{font-family:"Bodoni",Didot,serif;font-weight:600;font-size:30px;line-height:1.2;margin:28px 0 24px;max-width:28ch}
+.alert{background:var(--sheet);border:1px solid var(--ink);padding:18px 22px;margin:28px 0 8px}
+.alert b{display:block;font-size:18px;margin-bottom:2px}
+.alert p{margin:0;color:var(--soft)}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);grid-auto-rows:minmax(190px,auto);gap:0;border-top:1px solid var(--ink);border-left:1px solid var(--hair)}
+.tile{background:var(--sheet);border-right:1px solid var(--hair);border-bottom:1px solid var(--hair);padding:18px 18px 16px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.tile.lead{grid-column:span 2;grid-row:span 2;padding:26px 28px 24px}
+.sku{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:12px;color:var(--faint)}
+.tile h3{font-family:"Bodoni",Didot,serif;font-weight:600;font-size:19px;line-height:1.15;margin:0;overflow-wrap:anywhere}
+.tile.lead h3{font-size:44px;line-height:1.05;max-width:16ch}
+.save{margin:10px 0 0;font-size:18px;line-height:1.45;color:var(--soft);max-width:30ch}
+.was{position:relative;display:inline-block;align-self:flex-start;color:var(--soft);font-size:15px;margin-top:auto}
+.drop .was::after{content:"";position:absolute;left:-2px;right:-2px;top:52%;height:2px;background:var(--red);transform:scaleX(0);transform-origin:left;animation:strike .22s cubic-bezier(.2,.8,.2,1) .25s forwards}
+.now{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.price{font-family:"Bodoni",Didot,serif;font-weight:600;font-size:34px;line-height:1}
+.tile.lead .price{font-size:72px}
+.drop .price{color:var(--red)}
+.pct{font-weight:700;font-size:15px}
+.drop .pct{color:var(--red)}
+.tile.lead .pct{font-size:20px}
+.spark{opacity:0;animation:fade .25s ease-out .5s forwards;margin-top:6px}
+.tile.lead .spark{width:100%;height:auto;max-width:420px}
+.spark-cap{font-size:12px;color:var(--faint)}
+.sold .price{text-decoration:none}
+.tag{font-size:13px;font-weight:700;border:1px solid var(--ink);padding:1px 7px;align-self:flex-start}
+@keyframes strike{to{transform:scaleX(1)}}
+@keyframes fade{to{opacity:1}}
+@media (prefers-reduced-motion:reduce){.drop .was::after{animation:none;transform:none}.spark{animation:none;opacity:1}}
+.quiet{background:var(--sheet);border-top:1px solid var(--ink);border-bottom:1px solid var(--hair);padding:30px 28px;margin-bottom:8px}
+.quiet b{font-family:"Bodoni",Didot,serif;font-weight:600;font-size:26px;display:block;margin-bottom:6px}
+.quiet p{margin:0;color:var(--soft);max-width:60ch}
+h2{font-family:"Bodoni",Didot,serif;font-weight:600;font-size:26px;margin:40px 0 4px}
+.h2note{color:var(--soft);margin:0 0 14px;font-size:15px}
+.list{columns:2;column-gap:48px;border-top:1px solid var(--ink);padding-top:10px}
+.item{break-inside:avoid;display:flex;align-items:baseline;gap:8px;padding:5px 0;font-size:15px}
+.item .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:70%}
+.item .dots{flex:1;border-bottom:1px dotted var(--rule);transform:translateY(-4px)}
+.item .p{font-weight:500}
+.item.out .p{color:var(--faint)}
+.runs{width:100%;border-collapse:collapse;font-size:15px;border-top:1px solid var(--ink)}
+.runs th{text-align:left;font-weight:500;color:var(--soft);padding:10px 12px 8px;border-bottom:1px solid var(--hair)}
+.runs td{padding:9px 12px;border-bottom:1px solid var(--hair)}
+.runs .r{text-align:right}
+.runs tr.failed td{background:var(--sheet)}
+.runs tr.failed .st{font-weight:700}
+.runs tr.this td{font-weight:700}
+footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--hair);color:var(--faint);font-size:14px}
+@media (max-width:820px){.sheet{padding:28px 18px}h1{font-size:44px}.grid{grid-template-columns:1fr 1fr}.tile.lead{grid-column:span 2;grid-row:span 1}.tile.lead .price{font-size:52px}.list{columns:1}.mast{grid-template-columns:1fr}.issue{text-align:left}}
+</style></head><body><main class="sheet">
+<header class="mast">
+  <div><h1>Catalogue Watch</h1><div class="shelf">{{ shelf }}, checked every morning.</div></div>
+  <div class="issue"><b>{{ issue_date }}</b>Run {{ run_id }}{% if seconds %}, {{ '%.1f'|format(seconds) }} seconds{% endif %}</div>
 </header>
 
-<div class="kpis">
-  <div class="kpi"><div class="label">Products tracked</div><div class="value">{{ total }}</div>
-    <div class="delta">{{ k_total|safe }}</div></div>
-  <div class="kpi"><div class="label">Average price</div><div class="value">{{ currency }}{{ '%.2f'|format(avg) }}</div>
-    <div class="delta">{{ k_avg|safe }}</div></div>
-  <div class="kpi"><div class="label">In stock</div><div class="value">{{ '%.1f'|format(stock_pct) }}%</div>
-    <div class="delta">{{ k_stock|safe }}</div></div>
-  <div class="kpi{{ ' hot' if changes }}"><div class="label">Changes found</div><div class="value">{{ changes|length }}</div>
-    <div class="delta">{% if prev_id %}{{ drops }} price {{ 'drop' if drops == 1 else 'drops' }} vs run {{ prev_id }}{% else %}first run, no baseline{% endif %}</div></div>
+{% if failed %}
+<div class="alert" role="alert">
+  <b>This morning's check failed.</b>
+  <p>{{ error }} Nothing was overwritten: the prices below are from {{ shown_date }}, the last good run, and the next run tries again as usual.</p>
 </div>
+{% elif tiles %}
+<p class="lede">{{ headline }}</p>
+{% endif %}
 
-<section>
-  <div class="sec-head"><h2>What changed since the last run</h2><span>{% if prev_id %}run {{ prev_id }} → run {{ run_id }}{% endif %}</span></div>
-  {% if changes %}
-  <table>
-    <thead><tr><th>Change</th><th>Product</th><th class="r">Before</th><th class="r">After</th><th class="r">Difference</th></tr></thead>
-    <tbody>
-    {% for c in changes %}
-      <tr>
-        <td>{% if c.kind == 'price_drop' %}<span class="chip drop">Price drop</span>{% elif c.kind == 'price_rise' %}<span class="chip rise">Price rise</span>{% else %}<span class="chip stock">{{ c.kind.replace('_',' ')|capitalize }}</span>{% endif %}</td>
-        <td class="title">{{ c.title }}</td>
-        <td class="r">{{ c.before }}</td>
-        <td class="r">{{ c.after }}</td>
-        <td class="r">{% if c.delta %}<span class="{{ 'd-down' if c.delta < 0 else 'd-up' }}">{{ '%+.2f'|format(c.delta) }}</span>{% else %}<span class="flat">·</span>{% endif %}</td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <div class="empty"><b>No changes since the last run</b>{% if prev_id %}Every price and stock status matches run {{ prev_id }}. On a normal day this is the result, and no alert is sent.{% else %}This is the first run, so there is nothing to compare against yet.{% endif %}</div>
-  {% endif %}
+{% if tiles %}
+<section class="grid" aria-label="Changed since the last run">
+{% for t in tiles %}
+  <article class="tile {{ t.cls }}{% if loop.first and t.cls == 'drop' %} lead{% endif %}">
+    <span class="sku">SKU {{ t.sku }}</span>
+    <h3>{{ t.title }}</h3>
+    {% if loop.first and t.cls == 'drop' and t.save %}<p class="save">{{ t.save }}</p>{% endif %}
+    {% if t.kind == 'out_of_stock' %}
+      <span class="tag">Sold out</span>
+      <div class="now"><span class="price">{{ t.new }}</span></div>
+    {% elif t.kind in ('price_drop', 'price_rise') %}
+      <span class="was">was {{ t.old }}</span>
+      <div class="now"><span class="price">{{ t.new }}</span><span class="pct">{{ t.pct_text }}</span></div>
+    {% else %}
+      <div class="now"><span class="price">{{ t.new or t.old }}</span><span class="pct">{{ t.kind_text }}</span></div>
+    {% endif %}
+    {{ t.spark|safe }}
+    {% if t.spark %}<span class="spark-cap">{{ t.note }}</span>{% endif %}
+  </article>
+{% endfor %}
+</section>
+{% elif not failed %}
+<section class="quiet">
+  <b>Nothing moved since yesterday.</b>
+  <p>{{ total }} books checked. Every price and stock line matched the run on {{ prev_date }}, so no alert went out this morning.</p>
+</section>
+{% endif %}
+
+<h2>{{ 'The shelf at the last good run' if failed else 'The rest of the shelf' }}</h2>
+<p class="h2note">{{ shelf_note }}</p>
+<section class="list">
+{% for p in rest %}
+  <div class="item{% if not p.in_stock %} out{% endif %}"><span class="t">{{ p.title }}</span><span class="dots"></span><span class="p">{% if p.in_stock %}{{ currency }}{{ '%.2f'|format(p.price) }}{% else %}Sold out{% endif %}</span></div>
+{% endfor %}
 </section>
 
-<div class="grid2">
-<section class="card">
-  <div class="sec-head"><h2>Average price by rating</h2></div>
-  <div class="bars">
-  {% for b in buckets %}
-    <div class="bar{{ ' top' if b.top }}"><div>{{ b.label }}</div><div class="track"><div class="fill" style="width: {{ b.pct }}%"></div></div><div class="v">{{ currency }}{{ '%.2f'|format(b.value) }}</div></div>
+<h2>Recent runs</h2>
+<p class="h2note">Every run is kept, so a price can be traced back day by day.</p>
+<table class="runs">
+  <thead><tr><th>Date</th><th class="r">Books</th><th class="r">Changes</th><th class="r">Time</th><th>Status</th></tr></thead>
+  <tbody>
+  {% for r in runs %}
+    <tr class="{{ 'failed' if r.failed }}{{ ' this' if r.this }}"><td>{{ r.date }}</td><td class="r">{{ r.books }}</td><td class="r">{{ r.changes }}</td><td class="r">{{ r.time }}</td><td class="st">{{ r.status }}</td></tr>
   {% endfor %}
-  </div>
-  <div class="legend">Highlighted: the rating with the most products ({{ top_count }})</div>
-</section>
+  </tbody>
+</table>
 
-<section>
-  <div class="sec-head"><h2>Cheapest right now</h2><span>{{ cheapest|length }} of {{ total }}</span></div>
-  <table>
-    <thead><tr><th>Product</th><th class="r">Rating</th><th class="r">Price</th><th>Stock</th></tr></thead>
-    <tbody>
-    {% for p in cheapest %}
-      <tr><td class="title">{{ p.title }}</td><td class="r">{{ p.rating }}/5</td><td class="r">{{ currency }}{{ '%.2f'|format(p.price) }}</td>
-      <td>{% if p.in_stock %}In stock{% else %}<span class="stock-no">Out of stock</span>{% endif %}</td></tr>
-    {% endfor %}
-    </tbody>
-  </table>
-</section>
-</div>
-
-<footer><span>Source: {{ source }}</span><span>Catalogue watcher, a sample project by Ha Le</span></footer>
-</div>
-<script>
-(function(){
-  var root=document.documentElement, key="watcher-theme";
-  try{var saved=localStorage.getItem(key); if(saved) root.dataset.theme=saved;}catch(e){}
-  document.getElementById("toggle").onclick=function(){
-    root.dataset.theme = root.dataset.theme==="light" ? "dark" : "light";
-    try{localStorage.setItem(key, root.dataset.theme);}catch(e){}
-  };
-})();
-</script>
-</body></html>"""
+<footer>{{ footer }}</footer>
+</main></body></html>"""
 )
 
-
-def _delta(cur: float, prev: float | None, fmt: str, good_when_down: bool = True, unit: str = "") -> str:
-    if prev is None:
-        return "no previous run"
-    diff = cur - prev
-    if abs(diff) < 1e-9:
-        return '<span class="flat">no change</span> vs last run'
-    cls = ("down" if diff < 0 else "up") if good_when_down else ("down" if diff > 0 else "up")
-    return f'<span class="{cls}">{format(diff, fmt)}{unit}</span> vs last run'
+KIND_TEXT = {"back_in_stock": "Back in stock", "new": "New on the shelf", "removed": "Gone from the shelf"}
 
 
-def _money_delta(cur: float, prev: float | None, currency: str) -> str:
-    if prev is None:
-        return "no previous run"
-    diff = round(cur - prev, 2)
-    if abs(diff) < 0.005:
-        return '<span class="flat">no change</span> vs last run'
-    sign = "-" if diff < 0 else "+"
-    cls = "down" if diff < 0 else "up"
-    return f'<span class="{cls}">{sign}{currency}{abs(diff):.2f}</span> vs last run'
+def money(cur: str, v: float | None) -> str:
+    return "" if v is None else f"{cur}{v:.2f}"
 
 
-def _stats(rows):
-    prices = [r["price"] for r in rows] or [0.0]
-    stock = sum(1 for r in rows if r["in_stock"])
-    return {"n": len(rows), "avg": sum(prices) / len(prices),
-            "stock_pct": (stock / len(rows) * 100) if rows else 0.0}
+def headline(changes) -> str:
+    drops = sum(1 for c in changes if c.kind == "price_drop")
+    rises = sum(1 for c in changes if c.kind == "price_rise")
+    sold = sum(1 for c in changes if c.kind == "out_of_stock")
+    other = len(changes) - drops - rises - sold
+    words = {1: "One", 2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six", 7: "Seven", 8: "Eight", 9: "Nine"}
+    parts = []
+    if drops:
+        parts.append(f"{words.get(drops, drops)} {'price' if drops == 1 else 'prices'} fell")
+    if rises:
+        parts.append(f"{'one' if rises == 1 else words.get(rises, rises).lower()} rose")
+    if sold:
+        parts.append(f"{'one book' if sold == 1 else str(sold) + ' books'} sold out")
+    if other:
+        parts.append(f"{other} other {'change' if other == 1 else 'changes'}")
+    if not parts:
+        return "Nothing moved since yesterday."
+    text = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+    text = text[0].upper() + text[1:]
+    return text + " since yesterday."
 
 
-def build(run_rows, changes, meta: dict, out_path: Path, previous_rows=None) -> Path:
-    products = [dict(r) for r in run_rows]
-    prices = [p["price"] for p in products] or [0]
-    cur = _stats(products)
-    prev = _stats([dict(r) for r in previous_rows]) if previous_rows else None
-    currency = products[0]["currency"] if products else ""
+def build(store, run_id: int, out_path: Path, footer: str | None = None) -> Path:
+    run = store.run(run_id)
+    failed = run["status"] == "failed"
+    shown_id = store.last_ok_run_id(run_id) if failed else run_id
+    shown = store.run(shown_id) if shown_id else None
+    products = [dict(r) for r in store.observations(shown_id)] if shown_id else []
+    currency = products[0]["currency"] if products else "£"
+    prev_id = store.previous_run_id(run_id) if not failed else None
+    changes = store.compare(prev_id, run_id) if prev_id else []
+    history = store.price_history(shown_id, days=30) if shown_id else {}
 
-    buckets = []
-    for rating in (5, 4, 3, 2, 1):
-        group = [p["price"] for p in products if p["rating"] == rating]
-        if group:
-            buckets.append({"label": f"{rating} star · {len(group)}", "value": sum(group) / len(group), "n": len(group)})
-    top_value = max((b["value"] for b in buckets), default=0)
-    top_n = max((b["n"] for b in buckets), default=0)
-    for b in buckets:
-        b["pct"] = round(b["value"] / top_value * 100) if top_value else 0
-        b["top"] = b["n"] == top_n
+    def pct_text(c):
+        p = c.pct or 0
+        arrow = "↓" if p < 0 else "↑"
+        return f"{arrow} {abs(p) * 100:.0f}%"
 
-    started = meta.get("started_at")
-    when = (datetime.fromisoformat(started).astimezone().strftime("%d %b %Y, %H:%M")
-            if started else datetime.now().strftime("%d %b %Y, %H:%M"))
+    tiles = []
+    drops = sorted([c for c in changes if c.kind == "price_drop"], key=lambda c: c.pct)
+    others = [c for c in changes if c.kind != "price_drop"]
+    for c in drops + others:
+        series = [p for _, p in history.get(c.sku, [])]
+        tiles.append({
+            "sku": c.sku.rsplit("_", 1)[-1].zfill(4), "title": c.title, "kind": c.kind,
+            "cls": "drop" if c.kind == "price_drop" else ("sold" if c.kind == "out_of_stock" else "rise" if c.kind == "price_rise" else "other"),
+            "old": money(currency, c.old_price), "new": money(currency, c.new_price),
+            "pct_text": pct_text(c) if c.kind in ("price_drop", "price_rise") else "",
+            "kind_text": KIND_TEXT.get(c.kind, ""),
+            "spark": sparkline(series, drop=c.kind == "price_drop") if c.kind in ("price_drop", "price_rise") else "",
+            "days": len(series),
+            "save": ((f"{money(currency, c.old_price - c.new_price)} off since yesterday."
+                      + (f" None of the last {len(series) - 1} checks found it lower." if len(series) > 1 and c.new_price < min(series[:-1]) else ""))
+                     if c.kind == "price_drop" else ""),
+            "note": (("Lowest price in 30 days. " if c.kind == "price_drop" and series and c.new_price <= min(series) else "")
+                     + f"{len(series)} checks since {when(history[c.sku][0][0], '%-d %b')}") if series else "",
+        })
+    changed = {c.sku for c in changes}
+    rest = [p for p in products if p["sku"] not in changed]
 
+    runs = []
+    for r in store.runs(limit=14):
+        ok = r["status"] == "ok"
+        pid = store.previous_run_id(r["id"]) if ok else None
+        n = len(store.compare(pid, r["id"])) if pid else 0
+        runs.append({
+            "date": when(r["started_at"], "%a %-d %b, %-I:%M %p").replace("AM", "am").replace("PM", "pm"),
+            "books": r["products"] if ok else "",
+            "changes": (n if pid else "First run") if ok else "",
+            "time": f"{r['seconds']:.1f} s" if r["seconds"] is not None else "",
+            "status": "Done" if ok else f"Failed. {r['error']}",
+            "failed": not ok, "this": r["id"] == run_id,
+        })
+
+    label = run["source_label"] or run["source"]
     html = TEMPLATE.render(
-        fonts=font_css(),
-        theme=meta.get("theme", "dark"),
-        title=meta.get("title", "Catalogue watch"),
-        run_id=meta.get("run_id", "?"),
-        prev_id=meta.get("previous_run_id"),
-        when=when,
-        total=cur["n"],
-        pages=meta.get("pages") or 0,
-        seconds=meta.get("seconds") or 0.0,
-        engine=meta.get("engine", "http"),
-        currency=currency,
-        avg=cur["avg"],
-        median=statistics.median(prices),
-        stock_pct=cur["stock_pct"],
-        k_total=_delta(cur["n"], prev["n"] if prev else None, "+d", good_when_down=False),
-        k_avg=_money_delta(cur["avg"], prev["avg"] if prev else None, currency),
-        k_stock=_delta(cur["stock_pct"], prev["stock_pct"] if prev else None, "+.1f", good_when_down=False, unit=" pts"),
-        drops=sum(1 for c in changes if c.kind == "price_drop"),
-        changes=changes,
-        buckets=buckets,
-        top_count=top_n,
-        cheapest=sorted(products, key=lambda p: p["price"])[:7],
-        source=meta.get("source_label") or meta.get("source", ""),
+        fonts=font_css(), run_id=run_id, issue_date=when(run["started_at"]), seconds=run["seconds"],
+        shelf=label,
+        failed=failed, error=(run["error"] or "").rstrip(".") + "." if failed else "",
+        shown_date=when(shown["started_at"]) if shown else "",
+        headline=headline(changes), tiles=tiles, total=len(products),
+        prev_date=when(store.run(prev_id)["started_at"]) if prev_id else "",
+        rest=rest, currency=currency,
+        shelf_note=f"{len(rest)} books with no change today, A to Z." if not failed else f"{len(rest)} books, as of {when(shown['started_at']) if shown else ''}.",
+        runs=runs,
+        footer=footer or "Practice store data from books.toscrape.com, with price moves simulated on a local copy.",
     )
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)

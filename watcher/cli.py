@@ -1,4 +1,4 @@
-"""Command line entry point: crawl, store, compare and report."""
+"""Command line entry point: crawl, store, compare, report and alert."""
 
 from __future__ import annotations
 
@@ -7,6 +7,9 @@ import os
 import time
 from pathlib import Path
 
+import httpx
+
+from .alert import write_and_send
 from .report import build as build_report
 from .scrape import crawl
 from .store import Store
@@ -28,91 +31,89 @@ def _short(path) -> str:
         return str(path)
 
 
+def _reason(exc: Exception) -> str:
+    if isinstance(exc, httpx.ConnectError):
+        return "The site did not answer (connection refused)."
+    if isinstance(exc, httpx.TimeoutException):
+        return "The site timed out."
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"The site returned HTTP {exc.response.status_code}."
+    return f"{type(exc).__name__}: {exc}"
+
+
 def run(args: argparse.Namespace) -> int:
     store = Store(Path(args.db))
+    out_dir = Path(args.out_dir)
+    say = (lambda *a, **k: None) if args.quiet else print
     started = time.perf_counter()
     pages = {"n": 0}
 
-    print(f"{BOLD}Catalogue watcher{OFF} {DIM}(sample project){OFF}")
-    print(f"  source   {args.source_label or args.source}")
-    print(f"  engine   {args.engine}")
-    print(f"  database {_short(args.db)}\n")
+    say(f"{BOLD}Catalogue Watch{OFF}")
+    say(f"  source   {args.source_label or args.source}")
+    say(f"  engine   {args.engine}")
+    say(f"  database {_short(args.db)}\n")
 
     def on_page(index: int, url: str, found: int) -> None:
         pages["n"] = index
         short = url.split("/")[-1] or url
-        print(f"  {GREEN}page {index}{OFF}  {found:>3} products  {DIM}{short}{OFF}")
+        say(f"  {GREEN}page {index}{OFF}  {found:>3} products  {DIM}{short}{OFF}")
 
-    products = crawl(
-        args.source,
-        category=args.category,
-        max_pages=args.max_pages,
-        delay=args.delay,
-        engine=args.engine,
-        on_page=on_page,
-    )
+    products, error = None, None
+    for attempt in range(1, args.retries + 2):
+        try:
+            products = crawl(args.source, category=args.category, max_pages=args.max_pages,
+                             delay=args.delay, engine=args.engine, on_page=on_page)
+            break
+        except (httpx.HTTPError, OSError) as exc:
+            error = _reason(exc)
+            say(f"  attempt {attempt} failed: {error}")
+            if attempt <= args.retries:
+                time.sleep(args.retry_wait)
     seconds = time.perf_counter() - started
 
-    run_id = store.save_run([p.as_dict() for p in products], args.source, args.engine,
-                            pages=pages["n"], seconds=seconds, source_label=args.source_label)
-    prev_id = store.previous_run_id(run_id)
-    previous = [prev_id] if prev_id else []
-    changes = store.compare(prev_id, run_id) if prev_id else []
+    if products is None:
+        tries = args.retries + 1
+        msg = f"{error.rstrip('.')} after {tries} {'try' if tries == 1 else 'tries'}."
+        run_id = store.save_failed_run(args.source, args.engine, msg, seconds, args.source_label, args.as_of)
+        report_path = build_report(store, run_id, out_dir / f"report-{run_id}.html")
+        say(f"\n  run {run_id} failed: {msg}")
+        say(f"  report   {_short(report_path)} (shows the last good prices)")
+        return 1
 
-    csv_path = store.export_csv(run_id, Path(args.out_dir) / f"run-{run_id}.csv")
-    report_path = write_report(store, run_id, Path(args.out_dir), args.theme)
+    run_id = store.save_run([p.as_dict() for p in products], args.source, args.engine,
+                            pages=pages["n"], seconds=seconds, source_label=args.source_label, started_at=args.as_of)
+    prev_id = store.previous_run_id(run_id)
+    changes = store.compare(prev_id, run_id) if prev_id else []
+    csv_path = store.export_csv(run_id, out_dir / f"run-{run_id}.csv")
+    report_path = build_report(store, run_id, out_dir / f"report-{run_id}.html")
+    alert_path = write_and_send(store, run_id, changes, out_dir, report_path)
 
     drops = sum(1 for c in changes if c.kind == "price_drop")
-    print(f"\n  {BOLD}{len(products)} products{OFF} stored as run {run_id} in {seconds:.1f}s")
-    if previous:
-        print(f"  {len(changes)} changes against run {previous[0]}, including {drops} price drops")
+    say(f"\n  {BOLD}{len(products)} products{OFF} stored as run {run_id} in {seconds:.1f}s")
+    if prev_id:
+        say(f"  {len(changes)} changes against run {prev_id}, including {drops} price drops")
     else:
-        print("  first run, nothing to compare against yet")
-    print(f"  csv      {_short(csv_path)}")
-    print(f"  report   {_short(report_path)}")
+        say("  first run, nothing to compare against yet")
+    say(f"  csv      {_short(csv_path)}")
+    say(f"  report   {_short(report_path)}")
+    say(f"  alert    {_short(alert_path) if alert_path else 'none, nothing changed'}")
     return 0
-
-
-def write_report(store: Store, run_id: int, out_dir: Path, theme: str = "dark") -> Path:
-    row = store.run(run_id)
-    if row is None:
-        raise SystemExit(f"no run {run_id} in the database")
-    prev_id = store.previous_run_id(run_id)
-    changes = store.compare(prev_id, run_id) if prev_id else []
-    keys = row.keys()
-    return build_report(
-        store.observations(run_id),
-        changes,
-        {
-            "title": "Catalogue watch",
-            "run_id": run_id,
-            "previous_run_id": prev_id,
-            "started_at": row["started_at"],
-            "pages": row["pages"] if "pages" in keys else None,
-            "seconds": row["seconds"] if "seconds" in keys else None,
-            "engine": row["engine"],
-            "source": row["source"],
-            "source_label": row["source_label"] if "source_label" in keys else None,
-            "theme": theme,
-        },
-        out_dir / f"report-{run_id}.html",
-        previous_rows=store.observations(prev_id) if prev_id else None,
-    )
 
 
 def report(args: argparse.Namespace) -> int:
     store = Store(Path(args.db))
     run_id = args.run or store.runs(limit=1)[0]["id"]
-    path = write_report(store, run_id, Path(args.out_dir), args.theme)
+    path = build_report(store, run_id, Path(args.out_dir) / f"report-{run_id}.html")
     print(f"  report   {_short(path)}")
     return 0
 
 
 def history(args: argparse.Namespace) -> int:
     store = Store(Path(args.db))
-    print(f"{BOLD}run  when                  products  engine  source{OFF}")
+    print(f"{BOLD}run  when                       products  status{OFF}")
     for row in store.runs():
-        print(f"{row['id']:>3}  {row['started_at']}  {row['products']:>8}  {row['engine']:<7} {row['source'][:48]}")
+        status = "ok" if row["status"] == "ok" else f"failed: {row['error']}"
+        print(f"{row['id']:>3}  {row['started_at']:<25}  {row['products']:>8}  {status}")
     return 0
 
 
@@ -120,21 +121,23 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="watcher", description="Crawl a catalogue, store it, report what changed.")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    r = sub.add_parser("run", help="crawl and build a report")
+    r = sub.add_parser("run", help="crawl, compare, report and alert")
     r.add_argument("--source", default=DEFAULT_SOURCE)
     r.add_argument("--category", default="Mystery")
     r.add_argument("--engine", choices=["http", "browser"], default="http")
     r.add_argument("--max-pages", type=int, default=3)
     r.add_argument("--delay", type=float, default=0.5)
+    r.add_argument("--retries", type=int, default=2, help="extra attempts before the run is recorded as failed")
+    r.add_argument("--retry-wait", type=float, default=0.5)
     r.add_argument("--db", default=str(ROOT / "data" / "catalog.db"))
     r.add_argument("--out-dir", default=str(ROOT / "data"))
     r.add_argument("--source-label", default=None, help="friendly source name shown in the report")
-    r.add_argument("--theme", choices=["dark", "light"], default="dark")
+    r.add_argument("--as-of", default=None, help="ISO timestamp to record as the run time (backfills)")
+    r.add_argument("--quiet", action="store_true")
     r.set_defaults(func=run)
 
     rp = sub.add_parser("report", help="rebuild the HTML report for a stored run")
     rp.add_argument("--run", type=int, default=None, help="run id, default the latest")
-    rp.add_argument("--theme", choices=["dark", "light"], default="dark")
     rp.add_argument("--db", default=str(ROOT / "data" / "catalog.db"))
     rp.add_argument("--out-dir", default=str(ROOT / "data"))
     rp.set_defaults(func=report)

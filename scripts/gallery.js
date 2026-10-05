@@ -1,8 +1,6 @@
-// Captures the gallery images from real outputs in data/ (run the watcher first, and save
-// its output and the test output as data/run-2.log and data/pytest.log).
-//   npm install && node scripts/gallery.js ../raw ../
-// raw/ gets the inputs for the shared hero/deliverables renderer; the second
-// folder gets shot1-3 (1280x769 raw captures).
+// Captures the gallery inputs from real outputs in data/ (run fixtures/make_history.py first).
+//   npm install && node scripts/gallery.js ../raw ..
+// raw/ gets the inputs for the shared cover renderer; the second folder gets shot1-3.
 const { chromium } = require("playwright");
 const fs = require("fs");
 const path = require("path");
@@ -13,117 +11,83 @@ const SHOTS = path.resolve(process.argv[3] || path.join(CODE, ".."));
 const DATA = path.join(CODE, "data");
 const FONTS = path.join(CODE, "watcher", "assets", "fonts");
 fs.mkdirSync(RAW, { recursive: true });
-
 const font = (f) => "data:font/woff2;base64," + fs.readFileSync(path.join(FONTS, f)).toString("base64");
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-const LIGHT = { bg: "#F6F3EE", card: "#FFFFFF", raised: "#F1EDE6", line: "#E4DED4", ink: "#1B1A17", muted: "#6E6A62", faint: "#9A958C", ok: "#3F8A55", bad: "#C2543F", acc: "#D9782A" };
-const DARK = { bg: "#15171B", card: "#1E2126", raised: "#262A30", line: "#2F333A", ink: "#F3EFE7", muted: "#A7A39B", faint: "#77736C", ok: "#7CBA8C", bad: "#E8806E", acc: "#F2994A" };
+const reports = fs.readdirSync(DATA).filter((f) => /^report-\d+\.html$/.test(f)).map((f) => +f.match(/\d+/)[0]).sort((a, b) => b - a);
+const latest = reports[0];
 
-function shell(T, inner, width) {
-  return `<!doctype html><html><head><style>
-@font-face{font-family:Mono;src:url(${font("mono-500.woff2")})}
-@font-face{font-family:Plex;font-weight:400;src:url(${font("plex-400.woff2")})}
-@font-face{font-family:Plex;font-weight:600;src:url(${font("plex-600.woff2")})}
-@font-face{font-family:Brico;src:url(${font("bricolage-700.woff2")})}
-body{margin:0;background:${T.bg};padding:32px;font-family:Plex;color:${T.ink}}
-.card{width:${width}px;background:${T.card};border:1px solid ${T.line};border-radius:10px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.06),0 12px 32px rgba(0,0,0,.08)}
-.bar{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid ${T.line};font-size:13px;color:${T.muted}}
-.bar i{width:11px;height:11px;border-radius:50%;background:${T.line}}
-.bar span{margin-left:8px}
-pre{margin:0;padding:20px 24px 24px;font-family:Mono;font-size:15px;line-height:1.75;white-space:pre-wrap}
-.cmd{color:${T.acc}}
-table{border-collapse:collapse;width:100%;font-size:14px}
-th,td{padding:10px 14px;border-bottom:1px solid ${T.line};border-right:1px solid ${T.line};text-align:left;white-space:nowrap}
-th{font-family:Mono;font-weight:500;font-size:12px;color:${T.muted};background:${T.raised}}
-td.n{font-family:Mono;text-align:right}
-td.rowno{font-family:Mono;color:${T.faint};background:${T.raised};text-align:center;width:36px}
-</style></head><body>${inner}</body></html>`;
-}
-
-function terminalCard(T, command, text, title = "Terminal", width = 880) {
-  const lines = text.split("\n").filter((l, i, a) => !(l.trim() === "" && i === a.length - 1)).map((l) => {
-    let h = esc(l);
-    h = h.replace(/(page \d+)/, `<span style="color:${T.ok}">$1</span>`);
-    h = h.replace(/(\d+ changes against run \d+, including \d+ price drops)/, `<span style="color:${T.acc}">$1</span>`);
-    h = h.replace(/(PASSED)/, `<b style="color:${T.ok}">$1</b>`).replace(/(\d+ passed[^\n]*)/, `<b style="color:${T.ok}">$1</b>`);
-    return h;
-  }).join("\n");
-  return shell(T, `<div class="card"><div class="bar"><i></i><i></i><i></i><span>${esc(title)}</span></div><pre><span class="cmd">$ ${esc(command)}</span>\n${lines}</pre></div>`, width);
-}
-
-function csvCard(T, file, rows = 11, width = 1060) {
-  const [head, ...body] = fs.readFileSync(path.join(DATA, file), "utf8").trim().split("\n").map((l) => {
-    const out = []; let cur = "", q = false;
-    for (const ch of l) { if (ch === '"') q = !q; else if (ch === "," && !q) { out.push(cur); cur = ""; } else cur += ch; }
-    out.push(cur); return out;
-  });
-  const keep = ["title", "price", "currency", "rating", "in_stock", "category"];
+function csvSheet(file, rows = 12) {
+  const lines = fs.readFileSync(path.join(DATA, file), "utf8").trim().split("\n");
+  const parse = (l) => { const o = []; let c = "", q = false; for (const ch of l) { if (ch === '"') q = !q; else if (ch === "," && !q) { o.push(c); c = ""; } else c += ch; } o.push(c); return o; };
+  const head = parse(lines[0]);
+  const keep = ["sku", "title", "price", "rating", "in_stock"];
   const idx = keep.map((k) => head.indexOf(k));
-  const cols = "ABCDEF".split("");
-  let html = `<div class="card"><div class="bar"><span style="margin:0;font-family:Mono">${esc(file)}</span><span style="margin-left:auto">${body.length} rows</span></div><table><thead><tr><th></th>${cols.map((c) => `<th>${c}</th>`).join("")}</tr></thead><tbody>`;
-  html += `<tr><td class="rowno">1</td>${keep.map((k) => `<td style="font-weight:600">${k}</td>`).join("")}</tr>`;
-  body.slice(0, rows).forEach((r, i) => {
-    html += `<tr><td class="rowno">${i + 2}</td>${idx.map((j, c) => {
-      const v = r[j]; const num = c === 1 || c === 3;
-      const t = c === 0 && v.length > 44 ? v.slice(0, 44) + "..." : v;
-      return `<td class="${num ? "n" : ""}">${esc(t)}</td>`;
-    }).join("")}</tr>`;
-  });
-  return shell(T, html + "</tbody></table></div>", width);
+  const body = lines.slice(1, rows + 1).map(parse);
+  return `<!doctype html><html><head><style>
+@font-face{font-family:Karla;font-weight:400;src:url(${font("karla-400.woff2")})}
+@font-face{font-family:Karla;font-weight:700;src:url(${font("karla-700.woff2")})}
+body{margin:0;background:#F3EFE6;padding:28px;font-family:Karla;color:#1A1A1A;font-variant-numeric:tabular-nums}
+.card{width:880px;background:#FBF9F4;border:1px solid #DCD5C8}
+.bar{padding:12px 16px;border-bottom:1px solid #DCD5C8;font-size:14px;color:#5B574F;display:flex;justify-content:space-between}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{padding:8px 12px;border-bottom:1px solid #E7E1D5;border-right:1px solid #E7E1D5;text-align:left;white-space:nowrap}
+th{font-weight:700;background:#F3EFE6}
+td.n{text-align:right}
+td.row{color:#8A857B;text-align:center;width:34px;background:#F3EFE6}
+</style></head><body><div class="card"><div class="bar"><span>${esc(file)}, opened in a spreadsheet</span><span>${lines.length - 1} rows</span></div>
+<table><tr><th></th>${keep.map((k) => `<th>${k}</th>`).join("")}</tr>
+${body.map((r, i) => `<tr><td class="row">${i + 1}</td>${idx.map((j, c) => { let v = r[j]; if (c === 1 && v.length > 40) v = v.slice(0, 40) + "..."; return `<td class="${c === 2 || c === 3 ? "n" : ""}">${esc(v)}</td>`; }).join("")}</tr>`).join("")}
+</table></div></body></html>`;
 }
 
 (async () => {
   const b = await chromium.launch({ channel: "chromium" });
-  const page = async (w, h) => b.newPage({ viewport: { width: w, height: h }, deviceScaleFactor: 2 });
-  const report = (n, theme) => "file://" + path.join(DATA, `report-${n}.html`) + (theme ? "" : "");
-
-  // hero: dark report, KPIs and the change table
-  let p = await page(1440, 1000);
-  await p.goto(report(2));
-  // the gallery frame bleeds off the right edge, so dock the report column left for this capture
-  await p.evaluate(() => {
-    document.documentElement.dataset.theme = "dark";
-    const w = document.querySelector(".wrap"); w.style.margin = "0 0 0 24px"; w.style.maxWidth = "1100px";
-  });
-  await p.waitForTimeout(400);
-  await p.screenshot({ path: path.join(RAW, "hero_dark.png") });
-  await p.close();
-
-  // raw gallery shots, dark
-  p = await page(1280, 769);
-  await p.goto(report(2));
-  await p.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
-  await p.waitForTimeout(300);
-  await p.screenshot({ path: path.join(SHOTS, "shot1.png") });
-  await p.evaluate(() => { document.querySelector(".grid2").scrollIntoView({ block: "start" }); window.scrollBy(0, -32); });
-  await p.waitForTimeout(300);
-  await p.screenshot({ path: path.join(SHOTS, "shot2.png") });
-  await p.goto(report(3));
-  await p.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
-  await p.waitForTimeout(300);
-  await p.screenshot({ path: path.join(RAW, "empty_dark.png") });
-
-  // light tiles for the deliverables image
-  await p.goto(report(2));
-  await p.evaluate(() => { document.documentElement.dataset.theme = "light"; });
-  await p.waitForTimeout(300);
-  await p.screenshot({ path: path.join(RAW, "report_light.png") });
-  await p.close();
-
-  const card = async (html, out) => {
-    const q = await page(1200, 400);
-    await q.setContent(html);
-    await q.waitForTimeout(200);
-    await q.locator(".card").screenshot({ path: path.join(RAW, out) });
-    await q.close();
+  const open = async (w, h, file, scale = 2) => {
+    const p = await b.newPage({ viewport: { width: w, height: h }, deviceScaleFactor: scale });
+    await p.goto("file://" + path.join(DATA, file));
+    await p.waitForTimeout(1100); // the strike and sparkline animations finish
+    return p;
   };
-  await card(csvCard(LIGHT, "run-2.csv"), "csv_light.png");
-  await card(terminalCard(LIGHT, "python -m watcher.cli run --max-pages 2", fs.readFileSync(path.join(DATA, "run-2.log"), "utf8")), "terminal_light.png");
-  await card(terminalCard(LIGHT, "python -m pytest tests -v", fs.readFileSync(path.join(DATA, "pytest.log"), "utf8"), "Terminal", 980), "tests_light.png");
 
-  // shot3: the real run output and the exported spreadsheet, dark
-  await card(terminalCard(DARK, "python -m watcher.cli run --max-pages 2", fs.readFileSync(path.join(DATA, "run-2.log"), "utf8"), "Terminal", 640), "terminal_dark.png");
-  await card(csvCard(DARK, "run-2.csv", 9, 760), "csv_dark.png");
+  // cover: the catalog page with today's strikes, as a flat artifact
+  let p = await open(1200, 1000, `report-${latest}.html`);
+  const sheet = await p.locator(".sheet").boundingBox();
+  await p.screenshot({ path: `${RAW}/catalog_page.png`, clip: { x: sheet.x, y: 0, width: sheet.width, height: 900 } });
+  const runs = await p.locator("table.runs").boundingBox();
+  await p.screenshot({ path: `${RAW}/run_history.png`, fullPage: true, clip: { x: runs.x - 24, y: runs.y - 80, width: runs.width + 48, height: Math.min(runs.height + 104, 820) } });
+  await p.close();
+
+  p = await open(1280, 769, `report-${latest}.html`, 1);
+  await p.screenshot({ path: path.join(SHOTS, "shot1.png") });
+  await p.evaluate(() => document.querySelector(".list").scrollIntoView({ block: "center" }));
+  await p.screenshot({ path: path.join(SHOTS, "shot2.png") });
+  await p.close();
+
+  // quiet day: the empty state
+  const quiet = reports.find((n) => fs.readFileSync(path.join(DATA, `report-${n}.html`), "utf8").includes("Nothing moved since yesterday."));
+  p = await open(1200, 760, `report-${quiet}.html`);
+  await p.screenshot({ path: `${RAW}/no_changes.png` });
+  await p.close();
+
+  // failed day
+  const failed = reports.find((n) => fs.readFileSync(path.join(DATA, `report-${n}.html`), "utf8").includes("check failed."));
+  if (failed) {
+    p = await open(1280, 769, `report-${failed}.html`, 1);
+    await p.screenshot({ path: path.join(SHOTS, "shot3.png") });
+    await p.close();
+  }
+
+  // the alert email
+  p = await open(760, 520, `alerts/run-${latest}.html`);
+  const mail = await p.locator("table").first().boundingBox();
+  await p.screenshot({ path: `${RAW}/alert_email.png`, clip: { x: mail.x - 28, y: mail.y - 28, width: mail.width + 56, height: mail.height + 56 } });
+  await p.close();
+
+  // the CSV
+  p = await b.newPage({ viewport: { width: 960, height: 600 }, deviceScaleFactor: 2 });
+  await p.setContent(csvSheet(`run-${latest}.csv`));
+  await p.locator(".card").screenshot({ path: `${RAW}/csv.png` });
+  await p.close();
   await b.close();
-  console.log("gallery captures written to", RAW, "and", SHOTS);
+  console.log("captured from run", latest, "quiet run", quiet, "failed run", failed);
 })();

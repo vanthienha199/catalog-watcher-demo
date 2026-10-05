@@ -8,3 +8,4 @@ fixtures/catalogue/
 node_modules/
 .venv/
 docs/raw/
+fixtures/days/

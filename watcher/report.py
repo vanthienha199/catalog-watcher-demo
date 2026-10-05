@@ -75,7 +75,7 @@ h1{font-family:"Bodoni",Didot,serif;font-weight:600;font-size:64px;line-height:.
 .grid{display:grid;grid-template-columns:repeat(4,1fr);grid-auto-rows:minmax(190px,auto);gap:0;border-top:1px solid var(--ink);border-left:1px solid var(--hair)}
 .tile{background:var(--sheet);border-right:1px solid var(--hair);border-bottom:1px solid var(--hair);padding:18px 18px 16px;display:flex;flex-direction:column;gap:6px;min-width:0}
 .tile.lead{grid-column:span 2;grid-row:span 2;padding:26px 28px 24px}
-.sku{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:12px;color:var(--faint)}
+.sku{font-size:13px;color:var(--faint);font-variant-numeric:tabular-nums}
 .tile h3{font-family:"Bodoni",Didot,serif;font-weight:600;font-size:19px;line-height:1.15;margin:0;overflow-wrap:anywhere}
 .tile.lead h3{font-size:44px;line-height:1.05;max-width:16ch}
 .save{margin:10px 0 0;font-size:18px;line-height:1.45;color:var(--soft);max-width:30ch}
@@ -135,7 +135,7 @@ footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--hair);color:v
 <section class="grid" aria-label="Changed since the last run">
 {% for t in tiles %}
   <article class="tile {{ t.cls }}{% if loop.first and t.cls == 'drop' %} lead{% endif %}">
-    <span class="sku">SKU {{ t.sku }}</span>
+    <span class="sku">No. {{ t.sku }}</span>
     <h3>{{ t.title }}</h3>
     {% if loop.first and t.cls == 'drop' and t.save %}<p class="save">{{ t.save }}</p>{% endif %}
     {% if t.kind == 'out_of_stock' %}
